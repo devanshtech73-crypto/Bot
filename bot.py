@@ -8,13 +8,14 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Intents (no privileged intents needed)
 intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True  # Required for creating permissioned channels
 
-# Bot setup with - prefix
 bot = commands.Bot(command_prefix="-", intents=intents, help_command=None)
 
 ACCOUNTS_FILE = "accounts.json"
+CATEGORY_NAME = "Generated Accounts"  # Category to store private channels
 
 # ----------------------
 # Helper functions
@@ -30,6 +31,31 @@ def save_accounts(data):
     with open(ACCOUNTS_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+def is_admin(ctx):
+    return ctx.author.guild_permissions.manage_guild or ctx.author.guild_permissions.administrator
+
+async def get_or_create_private_channel(ctx):
+    guild = ctx.guild
+    # Check for category
+    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+    if category is None:
+        category = await guild.create_category(CATEGORY_NAME)
+    
+    # Check if user channel exists
+    channel_name = f"{ctx.author.name}-{ctx.author.discriminator}"
+    channel = discord.utils.get(category.channels, name=channel_name)
+    if channel is None:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        # Allow mods/admins to read
+        for member in guild.members:
+            if member.guild_permissions.manage_guild or member.guild_permissions.administrator:
+                overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=False)
+        channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+    return channel
+
 # ----------------------
 # Events
 # ----------------------
@@ -42,7 +68,7 @@ async def on_ready():
 # ----------------------
 @bot.command()
 async def gen(ctx, service: str):
-    """Generate an account and send it via DM"""
+    """Generate an account and post in private channel"""
     service = service.lower()
     data = load_accounts()
 
@@ -51,21 +77,16 @@ async def gen(ctx, service: str):
         return
 
     account = random.choice(data[service])
+    channel = await get_or_create_private_channel(ctx)
 
-    # Try sending DM first
-    try:
-        await ctx.author.send(f"**{service.upper()} Account:**\n```{account}```")
-    except discord.Forbidden:
-        await ctx.send(
-            f"❌ I cannot DM you. Enable 'Allow DMs from server members'.",
-            delete_after=15
-        )
-        return
-    else:
-        # Only remove account if DM succeeds
-        data[service].remove(account)
-        save_accounts(data)
-        await ctx.send(f"✅ Account sent to your DM.", delete_after=10)
+    # Post account in private channel
+    await channel.send(f"**{service.upper()} Account:**\n```{account}```")
+    
+    # Remove account after posting
+    data[service].remove(account)
+    save_accounts(data)
+
+    await ctx.send(f"✅ Account posted in your private channel: {channel.mention}", delete_after=15)
 
 @bot.command()
 async def stock(ctx, service: str = None):
@@ -89,11 +110,12 @@ async def help(ctx):
     msg = """
 **Blazy GEN Bot Commands**
 **User Commands:**
-- `-gen <service>` → Generate an account via DM
+- `-gen <service>` → Generate an account (posted in your private channel)
 - `-stock [service]` → Check stock for a service or all
+- `-help` → Show this help message
 
 **Admin / Moderator Commands (Require Manage Server permission):**
-- `-add <service> <account>` → Add an account to service
+- `-add <service> <account>` → Add an account
 - `-remove <service> <account>` → Remove an account
 - `-reset <service>` → Remove all accounts from a service
 """
@@ -102,14 +124,11 @@ async def help(ctx):
 # ----------------------
 # Admin / Moderator commands
 # ----------------------
-def is_admin(ctx):
-    return ctx.author.guild_permissions.manage_guild or ctx.author.guild_permissions.administrator
-
 @bot.command()
 async def add(ctx, service: str, *, account: str):
     """Add an account (Admin only)"""
     if not is_admin(ctx):
-        await ctx.send("❌ You do not have permission to use this command.", delete_after=10)
+        await ctx.send("❌ You do not have permission.", delete_after=10)
         return
 
     data = load_accounts()
@@ -124,7 +143,7 @@ async def add(ctx, service: str, *, account: str):
 async def remove(ctx, service: str, *, account: str):
     """Remove an account (Admin only)"""
     if not is_admin(ctx):
-        await ctx.send("❌ You do not have permission to use this command.", delete_after=10)
+        await ctx.send("❌ You do not have permission.", delete_after=10)
         return
 
     data = load_accounts()
@@ -140,7 +159,7 @@ async def remove(ctx, service: str, *, account: str):
 async def reset(ctx, service: str):
     """Reset all accounts for a service (Admin only)"""
     if not is_admin(ctx):
-        await ctx.send("❌ You do not have permission to use this command.", delete_after=10)
+        await ctx.send("❌ You do not have permission.", delete_after=10)
         return
 
     data = load_accounts()
