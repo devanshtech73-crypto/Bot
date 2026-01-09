@@ -1,0 +1,10 @@
+{
+  "mcfa": [
+    "email1@example.com:password1",
+    "email2@example.com:password2"
+  ],
+  "xbox": [
+    "xboxmail1@example.com:password1",
+    "xboxmail2@example.com:password2"
+  ]
+}
