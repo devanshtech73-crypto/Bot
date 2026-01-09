@@ -1,30 +1,28 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
 import json
 import random
 import os
 from dotenv import load_dotenv
 
-# Load env (Render will inject env vars automatically)
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Intents (NO privileged intents needed)
+# Intents (no privileged intents needed)
 intents = discord.Intents.default()
 
-class Bot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
-        await self.tree.sync()
-
-bot = Bot()
+# Bot setup with - prefix
+bot = commands.Bot(command_prefix="-", intents=intents, help_command=None)
 
 ACCOUNTS_FILE = "accounts.json"
 
+# ----------------------
+# Helper functions
+# ----------------------
 def load_accounts():
+    if not os.path.exists(ACCOUNTS_FILE):
+        with open(ACCOUNTS_FILE, "w") as f:
+            json.dump({}, f)
     with open(ACCOUNTS_FILE, "r") as f:
         return json.load(f)
 
@@ -32,59 +30,129 @@ def save_accounts(data):
     with open(ACCOUNTS_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+# ----------------------
+# Events
+# ----------------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-# /gen command
-@bot.tree.command(name="gen", description="Generate an account")
-@app_commands.describe(service="Service name like mcfa, xbox")
-async def gen(interaction: discord.Interaction, service: str):
+# ----------------------
+# User commands
+# ----------------------
+@bot.command()
+async def gen(ctx, service: str):
+    """Generate an account and send it via DM"""
     service = service.lower()
     data = load_accounts()
 
     if service not in data or not data[service]:
-        await interaction.response.send_message(
-            "No accounts available for this service.",
-            ephemeral=True
-        )
+        await ctx.send(f"No accounts available for **{service}**.", delete_after=10)
         return
 
     account = random.choice(data[service])
-    data[service].remove(account)
-    save_accounts(data)
 
+    # Try sending DM first
     try:
-        await interaction.user.send(
-            f"**{service.upper()} Account**\n```{account}```"
-        )
-        await interaction.response.send_message(
-            "Account sent to your DM.",
-            ephemeral=True
-        )
+        await ctx.author.send(f"**{service.upper()} Account:**\n```{account}```")
     except discord.Forbidden:
-        await interaction.response.send_message(
-            "Please enable DMs from server members.",
-            ephemeral=True
-        )
-
-# /stock command
-@bot.tree.command(name="stock", description="Check account stock")
-@app_commands.describe(service="Service name like mcfa, xbox")
-async def stock(interaction: discord.Interaction, service: str):
-    service = service.lower()
-    data = load_accounts()
-
-    if service not in data:
-        await interaction.response.send_message(
-            "Service not found.",
-            ephemeral=True
+        await ctx.send(
+            f"❌ I cannot DM you. Enable 'Allow DMs from server members'.",
+            delete_after=15
         )
         return
+    else:
+        # Only remove account if DM succeeds
+        data[service].remove(account)
+        save_accounts(data)
+        await ctx.send(f"✅ Account sent to your DM.", delete_after=10)
 
-    await interaction.response.send_message(
-        f"{service.upper()} stock: {len(data[service])}",
-        ephemeral=True
-    )
+@bot.command()
+async def stock(ctx, service: str = None):
+    """Check stock of accounts"""
+    data = load_accounts()
+    if service:
+        service = service.lower()
+        if service not in data:
+            await ctx.send(f"Service `{service}` not found.", delete_after=10)
+            return
+        await ctx.send(f"**{service.upper()} Stock:** {len(data[service])}", delete_after=10)
+    else:
+        msg = "**Account Stock:**\n"
+        for s, accounts in data.items():
+            msg += f"{s.upper()}: {len(accounts)}\n"
+        await ctx.send(msg, delete_after=20)
 
+@bot.command()
+async def help(ctx):
+    """Show help message"""
+    msg = """
+**Blazy GEN Bot Commands**
+**User Commands:**
+- `-gen <service>` → Generate an account via DM
+- `-stock [service]` → Check stock for a service or all
+
+**Admin / Moderator Commands (Require Manage Server permission):**
+- `-add <service> <account>` → Add an account to service
+- `-remove <service> <account>` → Remove an account
+- `-reset <service>` → Remove all accounts from a service
+"""
+    await ctx.send(msg, delete_after=60)
+
+# ----------------------
+# Admin / Moderator commands
+# ----------------------
+def is_admin(ctx):
+    return ctx.author.guild_permissions.manage_guild or ctx.author.guild_permissions.administrator
+
+@bot.command()
+async def add(ctx, service: str, *, account: str):
+    """Add an account (Admin only)"""
+    if not is_admin(ctx):
+        await ctx.send("❌ You do not have permission to use this command.", delete_after=10)
+        return
+
+    data = load_accounts()
+    service = service.lower()
+    if service not in data:
+        data[service] = []
+    data[service].append(account)
+    save_accounts(data)
+    await ctx.send(f"✅ Account added to **{service}**.", delete_after=10)
+
+@bot.command()
+async def remove(ctx, service: str, *, account: str):
+    """Remove an account (Admin only)"""
+    if not is_admin(ctx):
+        await ctx.send("❌ You do not have permission to use this command.", delete_after=10)
+        return
+
+    data = load_accounts()
+    service = service.lower()
+    if service in data and account in data[service]:
+        data[service].remove(account)
+        save_accounts(data)
+        await ctx.send(f"✅ Account removed from **{service}**.", delete_after=10)
+    else:
+        await ctx.send("❌ Account not found.", delete_after=10)
+
+@bot.command()
+async def reset(ctx, service: str):
+    """Reset all accounts for a service (Admin only)"""
+    if not is_admin(ctx):
+        await ctx.send("❌ You do not have permission to use this command.", delete_after=10)
+        return
+
+    data = load_accounts()
+    service = service.lower()
+    if service in data:
+        data[service] = []
+        save_accounts(data)
+        await ctx.send(f"✅ All accounts removed from **{service}**.", delete_after=10)
+    else:
+        await ctx.send("❌ Service not found.", delete_after=10)
+
+# ----------------------
+# Run bot
+# ----------------------
 bot.run(TOKEN)
