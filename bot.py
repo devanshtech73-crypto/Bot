@@ -1,25 +1,21 @@
 import discord
 from discord.ext import commands
-import json
-import random
 import os
-from dotenv import load_dotenv
+import json
 
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
-
+# -------- Intents --------
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True  # Required for creating permissioned channels
+intents.members = True
+intents.message_content = True  # REQUIRED for prefix commands
 
-bot = commands.Bot(command_prefix="-", intents=intents, help_command=None)
+# -------- Bot Setup --------
+bot = commands.Bot(command_prefix="-", intents=intents)
+bot.remove_command("help")  # remove default help
 
+# -------- Load Accounts --------
 ACCOUNTS_FILE = "accounts.json"
-CATEGORY_NAME = "Generated Accounts"  # Category to store private channels
 
-# ----------------------
-# Helper functions
-# ----------------------
 def load_accounts():
     if not os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE, "w") as f:
@@ -27,151 +23,95 @@ def load_accounts():
     with open(ACCOUNTS_FILE, "r") as f:
         return json.load(f)
 
-def save_accounts(data):
+def save_accounts(accounts):
     with open(ACCOUNTS_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+        json.dump(accounts, f, indent=4)
 
-def is_admin(ctx):
-    return ctx.author.guild_permissions.manage_guild or ctx.author.guild_permissions.administrator
+accounts_data = load_accounts()
 
-async def get_or_create_private_channel(ctx):
-    guild = ctx.guild
-    # Check for category
-    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
-    if category is None:
-        category = await guild.create_category(CATEGORY_NAME)
-    
-    # Check if user channel exists
-    channel_name = f"{ctx.author.name}-{ctx.author.discriminator}"
-    channel = discord.utils.get(category.channels, name=channel_name)
-    if channel is None:
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        # Allow mods/admins to read
-        for member in guild.members:
-            if member.guild_permissions.manage_guild or member.guild_permissions.administrator:
-                overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=False)
-        channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+# -------- Helper: Create Private Channel --------
+async def create_private_channel(guild, member):
+    category_name = "Generated Accounts"
+    category = discord.utils.get(guild.categories, name=category_name)
+    if not category:
+        category = await guild.create_category(category_name)
+
+    channel_name = f"{member.name}-account"
+    existing = discord.utils.get(guild.channels, name=channel_name)
+    if existing:
+        return existing
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
     return channel
 
-# ----------------------
-# Events
-# ----------------------
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
-
-# ----------------------
-# User commands
-# ----------------------
+# -------- Commands --------
 @bot.command()
-async def gen(ctx, service: str):
-    """Generate an account and post in private channel"""
-    service = service.lower()
-    data = load_accounts()
+async def help(ctx):
+    embed = discord.Embed(title="Bot Commands", color=discord.Color.green())
+    embed.add_field(name="-gen <service>", value="Generate an account (sent in private channel)", inline=False)
+    embed.add_field(name="-stock <service>", value="Shows remaining accounts for service", inline=False)
+    embed.add_field(name="-clearchannel", value="Admin: delete your private channel", inline=False)
+    await ctx.send(embed=embed)
 
-    if service not in data or not data[service]:
-        await ctx.send(f"No accounts available for **{service}**.", delete_after=10)
+@bot.command()
+async def gen(ctx, service: str = None):
+    if not service:
+        await ctx.send("❌ Please specify a service. Example: `-gen mcfa`")
         return
 
-    account = random.choice(data[service])
-    channel = await get_or_create_private_channel(ctx)
+    service = service.lower()
+    if service not in accounts_data or len(accounts_data[service]) == 0:
+        await ctx.send(f"❌ No accounts available for {service}.")
+        return
 
-    # Post account in private channel
-    await channel.send(f"**{service.upper()} Account:**\n```{account}```")
-    
-    # Remove account after posting
-    data[service].remove(account)
-    save_accounts(data)
+    # Pop account from list
+    account = accounts_data[service].pop(0)
+    save_accounts(accounts_data)
 
-    await ctx.send(f"✅ Account posted in your private channel: {channel.mention}", delete_after=15)
+    # Create private channel
+    channel = await create_private_channel(ctx.guild, ctx.author)
+    await channel.send(f"✅ Here is your **{service}** account: `{account}`")
+    await ctx.send(f"✅ Account sent in your private channel: {channel.mention}")
 
 @bot.command()
 async def stock(ctx, service: str = None):
-    """Check stock of accounts"""
-    data = load_accounts()
-    if service:
-        service = service.lower()
-        if service not in data:
-            await ctx.send(f"Service `{service}` not found.", delete_after=10)
-            return
-        await ctx.send(f"**{service.upper()} Stock:** {len(data[service])}", delete_after=10)
-    else:
-        msg = "**Account Stock:**\n"
-        for s, accounts in data.items():
-            msg += f"{s.upper()}: {len(accounts)}\n"
-        await ctx.send(msg, delete_after=20)
-
-@bot.command()
-async def help(ctx):
-    """Show help message"""
-    msg = """
-**Blazy GEN Bot Commands**
-**User Commands:**
-- `-gen <service>` → Generate an account (posted in your private channel)
-- `-stock [service]` → Check stock for a service or all
-- `-help` → Show this help message
-
-**Admin / Moderator Commands (Require Manage Server permission):**
-- `-add <service> <account>` → Add an account
-- `-remove <service> <account>` → Remove an account
-- `-reset <service>` → Remove all accounts from a service
-"""
-    await ctx.send(msg, delete_after=60)
-
-# ----------------------
-# Admin / Moderator commands
-# ----------------------
-@bot.command()
-async def add(ctx, service: str, *, account: str):
-    """Add an account (Admin only)"""
-    if not is_admin(ctx):
-        await ctx.send("❌ You do not have permission.", delete_after=10)
+    if not service:
+        await ctx.send("❌ Please specify a service. Example: `-stock mcfa`")
         return
 
-    data = load_accounts()
     service = service.lower()
-    if service not in data:
-        data[service] = []
-    data[service].append(account)
-    save_accounts(data)
-    await ctx.send(f"✅ Account added to **{service}**.", delete_after=10)
+    count = len(accounts_data.get(service, []))
+    await ctx.send(f"📦 `{service}` remaining accounts: {count}")
 
 @bot.command()
-async def remove(ctx, service: str, *, account: str):
-    """Remove an account (Admin only)"""
-    if not is_admin(ctx):
-        await ctx.send("❌ You do not have permission.", delete_after=10)
-        return
+@commands.has_permissions(administrator=True)
+async def clearchannel(ctx):
+    """Delete your private channel (Admin only)"""
+    if isinstance(ctx.channel, discord.TextChannel):
+        await ctx.channel.delete()
 
-    data = load_accounts()
-    service = service.lower()
-    if service in data and account in data[service]:
-        data[service].remove(account)
-        save_accounts(data)
-        await ctx.send(f"✅ Account removed from **{service}**.", delete_after=10)
+# -------- Error Handling --------
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You do not have permission to run this command.")
+    elif isinstance(error, commands.CommandNotFound):
+        await ctx.send("❌ Unknown command. Use `-help` to see commands.")
     else:
-        await ctx.send("❌ Account not found.", delete_after=10)
+        await ctx.send(f"❌ Error: {error}")
 
-@bot.command()
-async def reset(ctx, service: str):
-    """Reset all accounts for a service (Admin only)"""
-    if not is_admin(ctx):
-        await ctx.send("❌ You do not have permission.", delete_after=10)
-        return
+# -------- Run Bot --------
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ DISCORD_TOKEN environment variable is missing! Set it in your host dashboard.")
 
-    data = load_accounts()
-    service = service.lower()
-    if service in data:
-        data[service] = []
-        save_accounts(data)
-        await ctx.send(f"✅ All accounts removed from **{service}**.", delete_after=10)
-    else:
-        await ctx.send("❌ Service not found.", delete_after=10)
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user} | Prefix commands ready: '-'")
+    print("✅ Bot is fully operational!")
 
-# ----------------------
-# Run bot
-# ----------------------
 bot.run(TOKEN)
